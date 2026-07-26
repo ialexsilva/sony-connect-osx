@@ -210,25 +210,30 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         ambientLevelSlider.frame = NSRect(x: leftInset, y: 15,
                                           width: width - leftInset - rightInset, height: 24)
         ambientLevelSlider.autoresizingMask = [.width]
-        ambientLevelSlider.minValue = 0
-        ambientLevelSlider.maxValue = Double(HeadphonesController.maxAmbientLevel)
+        ambientLevelSlider.minValue = Double(HeadphonesController.ambientLevelRange.lowerBound)
+        ambientLevelSlider.maxValue = Double(HeadphonesController.ambientLevelRange.upperBound)
         ambientLevelSlider.isContinuous = false   // commit on mouse-up, don't flood RFCOMM
         // One tick per integer step so drags snap and the notches are
         // visible, matching the official app's stepped feel.
-        ambientLevelSlider.numberOfTickMarks = Int(HeadphonesController.maxAmbientLevel) + 1
+        ambientLevelSlider.numberOfTickMarks = HeadphonesController.ambientLevelRange.count
         ambientLevelSlider.allowsTickMarkValuesOnly = true
         ambientLevelSlider.tickMarkPosition = .below
+        ambientLevelSlider.setAccessibilityLabel("Ambient Sound Level")
         ambientLevelSlider.target = self
         ambientLevelSlider.action = #selector(ambientLevelChanged(_:))
         container.addSubview(ambientLevelSlider)
 
-        let minLabel = NSTextField(labelWithString: "0")
+        let minLabel = NSTextField(
+            labelWithString: "\(HeadphonesController.ambientLevelRange.lowerBound)"
+        )
         minLabel.font = .systemFont(ofSize: 9)
         minLabel.textColor = .secondaryLabelColor
         minLabel.frame = NSRect(x: leftInset, y: 2, width: 24, height: 11)
         container.addSubview(minLabel)
 
-        let maxLabel = NSTextField(labelWithString: "\(Int(HeadphonesController.maxAmbientLevel))")
+        let maxLabel = NSTextField(
+            labelWithString: "\(HeadphonesController.ambientLevelRange.upperBound)"
+        )
         maxLabel.font = .systemFont(ofSize: 9)
         maxLabel.textColor = .secondaryLabelColor
         maxLabel.alignment = .right

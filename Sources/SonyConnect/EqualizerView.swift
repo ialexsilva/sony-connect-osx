@@ -60,10 +60,12 @@ final class EqualizerView: NSView {
         let names = Self.bandLabels(count: count)
         for i in 0..<count {
             let slider = makeBandSlider()
+            let bandName = i < names.count ? names[i] : "\(i + 1)"
+            slider.setAccessibilityLabel("Equalizer \(bandName)")
             addSubview(slider)
             sliders.append(slider)
 
-            let label = makeLabel(i < names.count ? names[i] : "\(i + 1)")
+            let label = makeLabel(bandName)
             addSubview(label)
             labels.append(label)
         }

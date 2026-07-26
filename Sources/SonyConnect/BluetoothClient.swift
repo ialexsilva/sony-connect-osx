@@ -115,7 +115,7 @@ final class BluetoothClient: NSObject {
         status = .searching
 
         guard let target = targetPairedDevice() else {
-            status = .failed(reason: "Sony WH-1000XM4 not paired")
+            status = .failed(reason: "No supported Sony headphones paired")
             return
         }
 

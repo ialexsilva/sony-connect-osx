@@ -23,7 +23,7 @@ final class HeadphonesController {
         var eqBands: [Int] = []
         var autoOffEnabled: Bool = false
         var statusDescription: String = "Disconnected"
-        var ambientLevel: Int = 20          // 0...20, meaningful only while ncMode == .ambient
+        var ambientLevel: Int = HeadphonesController.ambientLevelRange.upperBound
         var ambientFocusOnVoice: Bool = false
     }
 
@@ -96,8 +96,8 @@ final class HeadphonesController {
     private var ncSettingType: UInt8 = 0x02  // device-reported; default DUAL_SINGLE_OFF for WH-1000XM4
     private var asmSettingType: UInt8 = 0x01 // device-reported; default LEVEL_ADJUSTMENT
     private var asmId: UInt8 = 0x00          // ambient mode: 0x00 NORMAL, 0x01 VOICE (Focus on Voice)
-    private var currentAmbientLevel: UInt8 = HeadphonesController.maxAmbientLevel  // retained across NC-mode switches
-    static let maxAmbientLevel: UInt8 = 20
+    private var currentAmbientLevel = UInt8(HeadphonesController.ambientLevelRange.upperBound)
+    static let ambientLevelRange = 1...20
 
     init() {
         policy = ConnectionPolicy(audio: audioMonitor)
@@ -190,9 +190,10 @@ final class HeadphonesController {
 
     func setAmbientLevel(_ level: Int) {
         guard initialized else { return }
-        let clamped = UInt8(clamping: min(max(level, 0), Int(Self.maxAmbientLevel)))
-        currentAmbientLevel = clamped
-        state.ambientLevel = Int(clamped)
+        let clamped = min(max(level, Self.ambientLevelRange.lowerBound),
+                          Self.ambientLevelRange.upperBound)
+        currentAmbientLevel = UInt8(clamped)
+        state.ambientLevel = clamped
         guard state.ncMode == .ambient else { return }
         sendNcasmSet(mode: .ambient)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
@@ -554,28 +555,27 @@ final class HeadphonesController {
         let ncValue = payload[4]
         asmSettingType = payload[5]
         asmId = payload[6]
-        let asmLevel = payload[7]
-        // Device reports 0 while NC/Off is active — only overwrite our
-        // remembered level when it reports an actual ambient level, so
-        // switching back to Ambient later restores the last level instead
-        // of resetting to 0.
-        if asmLevel > 0 { currentAmbientLevel = asmLevel }
+        let reportedAmbientLevel = payload[7]
 
         let mode: NCMode
         if effect == 0x00 {
             mode = .off
         } else if ncValue != 0x00 {
             mode = .noiseCancelling
-        } else if asmLevel > 0 {
-            mode = .ambient
         } else {
-            mode = .off
+            // Ambient level 0 is valid. The active effect combined with NC
+            // being disabled is what identifies Ambient mode.
+            mode = .ambient
+        }
+        if mode == .ambient,
+           Self.ambientLevelRange.contains(Int(reportedAmbientLevel)) {
+            currentAmbientLevel = reportedAmbientLevel
         }
         state.ncMode = mode
         state.ambientLevel = Int(currentAmbientLevel)
         state.ambientFocusOnVoice = (asmId == 0x01)
         FileLogger.shared.log("state",
-            "NCASM = \(mode.rawValue) (effect=\(String(format: "0x%02X", effect)) ncT=\(ncSettingType) ncV=\(ncValue) asmT=\(asmSettingType) asmL=\(asmLevel))")
+            "NCASM = \(mode.rawValue) (effect=\(String(format: "0x%02X", effect)) ncT=\(ncSettingType) ncV=\(ncValue) asmT=\(asmSettingType) asmL=\(reportedAmbientLevel))")
     }
 
     private func parseBattery(_ payload: [UInt8]) {

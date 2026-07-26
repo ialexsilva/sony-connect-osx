@@ -1,6 +1,6 @@
 # SonyConnect MacOS
 
-A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth — toggle the touch panel, switch between Noise Cancelling / Ambient Sound / Off, turn Speak-to-Chat on or off, and power the headphones off on demand or automatically after an idle window, all from the menu bar.
+A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth — toggle the touch panel, switch between Noise Cancelling / Ambient Sound / Off, adjust the Ambient Sound level and Focus on Voice, turn Speak-to-Chat on or off, and power the headphones off on demand or automatically after an idle window, all from the menu bar.
 
 <img width="265" height="305" alt="image" src="https://github.com/user-attachments/assets/16ec2f0d-85c1-4ef6-abfa-af35522f731b" />
 
@@ -8,10 +8,10 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
 
 ## Features
 
-- Auto-connects to a paired Sony WH-1000XM4 as soon as the app starts
+- Watches for a paired Sony WH-1000XM4 and opens the control channel on demand when audio starts or the menu is opened
 - Menu-bar UI:
   - **Touch Sensor** (enable / disable the right-earcup swipe panel)
-  - **Noise Cancelling** — On / Ambient Sound / Off
+  - **Noise Cancelling** — On / Ambient Sound / Off, with Ambient level (1–20) and Focus on Voice controls
   - **Speak-to-Chat** — On / Off
   - **Equalizer** — preset submenu (names pulled live from the device's capability table) plus a 6-band graphic EQ (5 frequency bands + Clear Bass) with sliders
   - **Volume** — full-width slider over the headphones' output level
@@ -24,7 +24,9 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
 
 ## Supported headphones
 
-Built and tested on **Sony WH-1000XM4**. The name-matching list in [`BluetoothClient.swift`](Sources/SonyConnect/BluetoothClient.swift) also accepts WH-1000XM3 and WH-1000XM5. Other Sony MDR-family headphones may work — feature mapping (which opcode controls what) is partly device-specific.
+Built and tested on **Sony WH-1000XM4**. The current transport and command implementation targets Sony's first-generation MDR protocol. The WH-1000XM3 uses the same protocol family and is detected, but is not hardware-verified here.
+
+The name-matching list currently detects the WH-1000XM5 as well, but XM5/XM6 support requires Sony's second-generation service UUID, protocol negotiation, and command layouts, which are not implemented yet. Device detection alone does not imply feature support.
 
 ## Requirements
 
@@ -51,10 +53,10 @@ On first launch macOS will ask for Bluetooth permission — approve it once.
 
 ## Usage
 
-After launch a headphones icon appears in the menu bar. Click it (left or right) to open the menu:
+While the headphones are connected to the Mac at the Bluetooth level, a headphones icon appears in the menu bar. Click it (left or right) to open the menu:
 
 - **Touch Sensor: ON / OFF** — click to toggle
-- **Noise Cancelling ▸** — submenu with three radio-style options (NC, Ambient, Off)
+- **Noise Cancelling ▸** — submenu with three radio-style options (NC, Ambient, Off) plus Ambient Sound level and Focus on Voice settings
 - **Speak-to-Chat: ON / OFF** — click to toggle
 - **Power Off after 30 min idle** — checkbox; when on, the app sends the power-off command if no audio plays on the headphones' audio device for 30 minutes. Setting is persisted in `UserDefaults` and survives relaunch.
 - **Power Off Headphones** — sends the power-off command immediately. The headphones shut down and Bluetooth disconnects.
@@ -85,11 +87,11 @@ SET commands:
 | ------------------- | ------------------------------------------------------------------------- |
 | Touch panel         | `D8 <slot> <type> <value>` (slot/type from capability discovery)          |
 | Noise Cancelling    | `68 02 11 <ncType> 02 <asmType> 00 00` (DUAL NC)                          |
-| Ambient Sound       | `68 02 11 <ncType> 00 <asmType> 00 14` (asmLevel=20)                      |
+| Ambient Sound       | `68 02 11 <ncType> 00 <asmType> <asmId> <asmLevel>` (level 1…20)           |
 | NC Off              | `68 02 00 <ncType> 00 <asmType> 00 00`                                    |
 | Speak-to-Chat       | `F8 05 01 <0\|1>`                                                          |
 | EQ preset           | `58 01 <presetId> 00` (`EQEBB_SET_PARAM` + `PRESET_EQ`)                   |
-| EQ custom bands      | `58 01 A0 <nBands> <b0…bN>` (preset `CUSTOM`, band values 0…20, 10 = flat)|
+| EQ custom bands     | `58 01 FF <nBands> <b0…bN>` (preset `UNSPECIFIED`, values 0…20, 10 = flat) |
 | Power Off           | `22 00 01` (`COMMON_SET_POWER_OFF` + `USER_POWER_OFF`)                    |
 
 `ncType` and `asmType` come from the device's GET response — different firmware uses different setting-type bytes (`LEVEL_ADJUSTMENT = 0x01` vs `DUAL_SINGLE_OFF = 0x02`), so they're read live rather than hardcoded.
@@ -110,6 +112,7 @@ Sources/SonyConnect/
   MediaController.swift    — Pauses Now-Playing media via MediaRemote.framework
   VolumeController.swift   — CoreAudio output-volume get/set
   EqualizerView.swift      — graphic-EQ band sliders (custom menu-item view)
+  ScrollableSlider.swift   — stepped sliders with coalesced scroll-wheel support
   SupportedDevices.swift   — device name hints
   FileLogger.swift         — Plain-text log to ~/Library/Logs/SonyConnect.log
 Resources/Info.plist       — LSUIElement + NSBluetoothAlwaysUsageDescription
@@ -121,7 +124,7 @@ Package.swift              — Swift Package Manager manifest
 
 - Ad-hoc codesigned only — not notarized, not signed for distribution. Re-sign before sharing the `.app` with anyone else.
 - Connects to the first matching paired device. Multi-device routing not implemented.
-- Only the features above are wired up. EQ, multipoint, firmware auto-power-off duration, voice guidance, wear-detection, etc. are protocol-supported but unimplemented.
+- Only the features above are wired up. Multipoint, firmware controls, configurable auto-power-off duration, voice guidance, wear detection, etc. are protocol-supported but unimplemented.
 - The Sony protocol is reverse-engineered — a firmware update can change opcodes. If the touch toggle stops doing anything physical, check `~/Library/Logs/SonyConnect.log` for the device's capability response and adapt.
 
 ## Credits
