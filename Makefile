@@ -1,13 +1,29 @@
 APP_NAME = SonyConnect
 BUILD_DIR = .build/release
 APP_BUNDLE = $(APP_NAME).app
+TOOLCHAIN_DEVELOPER_PATH := $(shell xcode-select -p)
 
-.PHONY: all build app run clean
+# Some standalone Command Line Tools releases ship Swift Testing outside the
+# default compiler/runtime search paths. Full Xcode configures these itself.
+ifeq ($(notdir $(TOOLCHAIN_DEVELOPER_PATH)),CommandLineTools)
+TEST_FRAMEWORKS = $(TOOLCHAIN_DEVELOPER_PATH)/Library/Developer/Frameworks
+TEST_INTEROP_LIBS = $(TOOLCHAIN_DEVELOPER_PATH)/Library/Developer/usr/lib
+SWIFT_TEST_FLAGS = \
+	-Xswiftc -F -Xswiftc $(TEST_FRAMEWORKS) \
+	-Xlinker -F$(TEST_FRAMEWORKS) \
+	-Xlinker -rpath -Xlinker $(TEST_FRAMEWORKS) \
+	-Xlinker -rpath -Xlinker $(TEST_INTEROP_LIBS)
+endif
+
+.PHONY: all build test app run clean
 
 all: app
 
 build:
 	swift build -c release
+
+test:
+	swift test $(SWIFT_TEST_FLAGS)
 
 app: build
 	rm -rf $(APP_BUNDLE)

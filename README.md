@@ -26,7 +26,7 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
 
 Built and tested on **Sony WH-1000XM4**. The current transport and command implementation targets Sony's first-generation MDR protocol. The WH-1000XM3 uses the same protocol family and is detected, but is not hardware-verified here.
 
-The name-matching list currently detects the WH-1000XM5 as well, but XM5/XM6 support requires Sony's second-generation service UUID, protocol negotiation, and command layouts, which are not implemented yet. Device detection alone does not imply feature support.
+The protocol code is now isolated behind a versioned adapter boundary, but only the V1 adapter is implemented and selected. The name-matching list currently detects the WH-1000XM5 as well, but XM5/XM6 support still requires Sony's second-generation service UUID, protocol negotiation, and V2 command layouts. Device detection alone does not imply feature support.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ That:
 
 On first launch macOS will ask for Bluetooth permission — approve it once.
 
-`make clean` removes build artefacts.
+Run the framing and V1 protocol contract tests with `make test`. `make clean` removes build artefacts.
 
 ## Usage
 
@@ -96,16 +96,33 @@ SET commands:
 
 `ncType` and `asmType` come from the device's GET response — different firmware uses different setting-type bytes (`LEVEL_ADJUSTMENT = 0x01` vs `DUAL_SINGLE_OFF = 0x02`), so they're read live rather than hardcoded.
 
+## Architecture
+
+Bluetooth and macOS lifecycle code stay in the app target. Framing, protocol-neutral intents/events, and every V1 opcode live in the Foundation-only `SonyConnectCore` target:
+
+```
+BluetoothClient → SonyFrameParser → HeadphonesController → SonyProtocolAdapter
+                                              ↕
+                                       SonyProtocolV1
+```
+
+`HeadphonesController` asks for operations such as `getBattery` or `setNoiseControl`; the adapter owns the wire payload and converts replies into typed events. This is the seam where `SonyProtocolV2` will be added. Unknown frame types retain their raw value instead of being silently decoded as V1.
+
+The invariants and next V2 implementation slice are documented in [`docs/PROTOCOL_ARCHITECTURE.md`](docs/PROTOCOL_ARCHITECTURE.md).
+
 ## Project layout
 
 ```
+Sources/SonyConnectCore/
+  SonyPacket.swift           — shared frame encoding / incremental stream parser
+  SonyProtocol.swift         — protocol-neutral intents, requests, events, adapter contract
+  SonyProtocolV1.swift       — complete V1 payload encoder/decoder used by the app
 Sources/SonyConnect/
   main.swift               — NSApplication bootstrap (.accessory mode, no Dock icon)
   AppDelegate.swift        — Owns the menu bar controller
   MenuBarController.swift  — NSStatusItem, menu, click routing
-  HeadphonesController.swift — Protocol state machine
+  HeadphonesController.swift — Bluetooth session orchestration + UI-facing state
   BluetoothClient.swift    — IOBluetooth RFCOMM wrapper, SDP query, ACL reachability
-  SonyPacket.swift         — Sony frame encoding / decoding (markers, escape, checksum)
   ConnectionPolicy.swift   — lazy connect + idle disconnect (battery saving)
   AudioActivityMonitor.swift — CoreAudio "is the device playing" probe
   AutoPowerOff.swift       — idle-based power-off timer
@@ -115,8 +132,9 @@ Sources/SonyConnect/
   ScrollableSlider.swift   — stepped sliders with coalesced scroll-wheel support
   SupportedDevices.swift   — device name hints
   FileLogger.swift         — Plain-text log to ~/Library/Logs/SonyConnect.log
+Tests/SonyConnectCoreTests/ — framing and V1 adapter contract tests
 Resources/Info.plist       — LSUIElement + NSBluetoothAlwaysUsageDescription
-Makefile                   — build, app, run, clean
+Makefile                   — build, test, app, run, clean
 Package.swift              — Swift Package Manager manifest
 ```
 

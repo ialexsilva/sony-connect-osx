@@ -1,31 +1,28 @@
 import Foundation
+import SonyConnectCore
 
 final class HeadphonesController {
-    enum NCMode: String {
-        case noiseCancelling, ambient, off
-    }
-
-    struct EqPreset {
-        let id: UInt8
-        let name: String
-    }
+    typealias NCMode = SonyNoiseControlMode
+    typealias EqPreset = SonyEqualizerPreset
 
     struct State {
-        var isConnected: Bool = false       // SPP control channel is open
-        var deviceReachable: Bool = false   // headphones present at the BT (ACL) level
-        var touchSensorEnabled: Bool? = nil
-        var ncMode: NCMode? = nil
-        var speakToChatEnabled: Bool? = nil
-        var batteryLevel: Int? = nil
-        var batteryCharging: Bool = false
+        var isConnected = false       // SPP control channel is open
+        var deviceReachable = false   // headphones present at the BT (ACL) level
+        var touchSensorEnabled: Bool?
+        var ncMode: NCMode?
+        var speakToChatEnabled: Bool?
+        var batteryLevel: Int?
+        var batteryCharging = false
         var eqPresets: [EqPreset] = []
-        var eqCurrentPresetId: UInt8? = nil
+        var eqCurrentPresetId: UInt8?
         var eqBands: [Int] = []
-        var autoOffEnabled: Bool = false
-        var statusDescription: String = "Disconnected"
-        var ambientLevel: Int = HeadphonesController.ambientLevelRange.upperBound
-        var ambientFocusOnVoice: Bool = false
+        var autoOffEnabled = false
+        var statusDescription = "Disconnected"
+        var ambientLevel = SonyNoiseControlSettings.ambientLevelRange.upperBound
+        var ambientFocusOnVoice = false
     }
+
+    static let ambientLevelRange = SonyNoiseControlSettings.ambientLevelRange
 
     private(set) var state = State() {
         didSet { onStateChange?(state) }
@@ -35,6 +32,7 @@ final class HeadphonesController {
 
     private let bluetooth = BluetoothClient()
     private let parser = SonyFrameParser()
+    private let protocolAdapter: any SonyProtocolAdapter
     private let autoOff = AutoPowerOff()
     private let media = MediaController()
     private let audioMonitor = AudioActivityMonitor(nameHints: SupportedDevices.nameHints)
@@ -42,94 +40,42 @@ final class HeadphonesController {
     private var outgoingSequence: UInt8 = 0
     private var initialized = false
     private var awaitingInitResponse = false
-    private var deviceName: String = "headphones"
+    private var deviceName = "headphones"
 
-    // Sony MDR V1 opcodes (from JADX decompile of Sony Headphones Connect
-    // 9.3.0, package com.sony.songpal.tandemfamily.message.mdr.v1.table1).
-    // 0xD0..0xD9 = GENERAL_SETTING_* family.
-    // Inside GENERAL_SETTING_* payloads, second byte is the "GsInquiredType"
-    // = slot identifier: D1 = GS1, D2 = GS2, D3 = GS3.
-    // Sony stores TOUCH_PANEL_SETTING in one of these slots, chosen per-firmware.
-    private enum Opcode {
-        static let initRequest: UInt8 = 0x00
-        static let initReply: UInt8 = 0x01
-        static let batteryGet: UInt8 = 0x10
-        static let batteryRet: UInt8 = 0x11
-        static let batteryNotify: UInt8 = 0x13
-        static let batterySingleInquiredType: UInt8 = 0x00   // BatteryInquiredType.BATTERY
-        static let commonSetPowerOff: UInt8 = 0x22
-        static let eqGetCapability: UInt8 = 0x50
-        static let eqRetCapability: UInt8 = 0x51
-        static let eqGetParam: UInt8 = 0x56
-        static let eqRetParam: UInt8 = 0x57
-        static let eqSetParam: UInt8 = 0x58
-        static let eqNotifyParam: UInt8 = 0x59
-        static let eqPresetInquiredType: UInt8 = 0x01        // EqEbbInquiredType.PRESET_EQ
-        static let eqPresetCustom: UInt8 = 0xA0              // EqPresetId.CUSTOM
-        static let eqPresetUnspecified: UInt8 = 0xFF         // EqPresetId.UNSPECIFIED
-        static let powerOffFixedValue: UInt8 = 0x00
-        static let powerOffUserOff: UInt8 = 0x01
-        static let ncasmGet: UInt8 = 0x66
-        static let ncasmRet: UInt8 = 0x67
-        static let ncasmSet: UInt8 = 0x68
-        static let ncasmNotify: UInt8 = 0x69
-        static let ncasmCombinedInquiredType: UInt8 = 0x02   // NOISE_CANCELLING_AND_AMBIENT_SOUND_MODE
-        static let gsGetCapability: UInt8 = 0xD0
-        static let gsRetCapability: UInt8 = 0xD1
-        static let touchSensorGet: UInt8 = 0xD6
-        static let touchSensorRet: UInt8 = 0xD7
-        static let touchSensorSet: UInt8 = 0xD8
-        static let touchSensorNotify: UInt8 = 0xD9
-        static let gs1SubId: UInt8 = 0xD1
-        static let gs2SubId: UInt8 = 0xD2
-        static let gs3SubId: UInt8 = 0xD3
-        static let systemGet: UInt8 = 0xF6
-        static let systemRet: UInt8 = 0xF7
-        static let systemSet: UInt8 = 0xF8
-        static let systemNotify: UInt8 = 0xF9
-        static let smartTalkingMode: UInt8 = 0x05            // SystemInquiredType.SMART_TALKING_MODE
-        static let smartTalkingParamModeOnOff: UInt8 = 0x01
-    }
-
-    private var touchPanelSlot: UInt8?
-    private var touchPanelIsListType: Bool = false
-    private var ncSettingType: UInt8 = 0x02  // device-reported; default DUAL_SINGLE_OFF for WH-1000XM4
-    private var asmSettingType: UInt8 = 0x01 // device-reported; default LEVEL_ADJUSTMENT
-    private var asmId: UInt8 = 0x00          // ambient mode: 0x00 NORMAL, 0x01 VOICE (Focus on Voice)
-    private var currentAmbientLevel = UInt8(HeadphonesController.ambientLevelRange.upperBound)
-    static let ambientLevelRange = 1...20
-
-    init() {
+    init(protocolAdapter: any SonyProtocolAdapter = SonyProtocolV1()) {
+        self.protocolAdapter = protocolAdapter
         policy = ConnectionPolicy(audio: audioMonitor)
-        bluetooth.onStatus = { [weak self] s in self?.handleStatus(s) }
-        bluetooth.onData = { [weak self] data in self?.handleIncoming(data) }
-        autoOff.onShouldPowerOff = { [weak self] in self?.sendPowerOff() }
-        autoOff.onEnabledChanged = { [weak self] _ in
-            guard let self = self else { return }
-            self.state.autoOffEnabled = self.autoOff.isEnabled
+
+        bluetooth.onStatus = { [weak self] status in
+            self?.handleStatus(status)
         }
-        policy.onShouldConnect = { [weak self] in self?.bluetooth.connect() }
-        policy.onShouldDisconnect = { [weak self] in
-            FileLogger.shared.log("policy", "disconnecting RFCOMM to save headphones battery")
-            self?.bluetooth.disconnect()
+        bluetooth.onData = { [weak self] data in
+            self?.handleIncoming(data)
         }
         bluetooth.onReachabilityChange = { [weak self] reachable, name in
             self?.handleReachability(reachable, name: name)
         }
+        autoOff.onShouldPowerOff = { [weak self] in
+            self?.sendPowerOff()
+        }
+        autoOff.onEnabledChanged = { [weak self] _ in
+            guard let self else { return }
+            self.state.autoOffEnabled = self.autoOff.isEnabled
+        }
+        policy.onShouldConnect = { [weak self] in
+            self?.bluetooth.connect()
+        }
+        policy.onShouldDisconnect = { [weak self] in
+            FileLogger.shared.log(
+                "policy",
+                "disconnecting RFCOMM to save headphones battery"
+            )
+            self?.bluetooth.disconnect()
+        }
+
         state.autoOffEnabled = autoOff.isEnabled
         bluetooth.startReachabilityMonitoring()
         policy.start()
-    }
-
-    private func handleReachability(_ reachable: Bool, name: String?) {
-        if let name = name { deviceName = name }
-        state.deviceReachable = reachable
-        // Keep the status line consistent with the icon while the SPP
-        // channel is closed: "(idle)" when the device is still around,
-        // "Disconnected" when it's gone.
-        if !state.isConnected {
-            state.statusDescription = reachable ? "\(deviceName) (idle)" : "Disconnected"
-        }
     }
 
     var autoOffEnabled: Bool {
@@ -143,27 +89,13 @@ final class HeadphonesController {
     }
 
     func connect() {
-        // User clicked Reconnect — counts as user activity.
         policy.userActivity()
     }
 
-    // Called when the menu is about to open. The policy treats this as
-    // user activity: connects on demand if currently idle-disconnected
-    // and pushes back the next idle-disconnect.
+    // Opening the menu counts as activity: connect on demand if the control
+    // channel is idle and postpone the next battery-saving disconnect.
     func userActivity() {
         policy.userActivity()
-    }
-
-    private func resetSessionState() {
-        initialized = false
-        awaitingInitResponse = false
-        outgoingSequence = 0
-        parser.reset()
-        touchPanelSlot = nil
-        touchPanelIsListType = false
-        ncSettingType = 0x02
-        asmSettingType = 0x01
-        asmId = 0x00
     }
 
     func toggleTouchSensor() {
@@ -171,171 +103,123 @@ final class HeadphonesController {
             FileLogger.shared.log("cmd", "toggle ignored: not initialized")
             return
         }
-        let next = !(state.touchSensorEnabled ?? false)
-        sendTouchSensor(enabled: next)
-        state.touchSensorEnabled = next
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.sendTouchSensorGet()
-        }
+
+        let enabled = !(state.touchSensorEnabled ?? false)
+        sendProtocolIntent(.setTouchSensor(enabled))
+        state.touchSensorEnabled = enabled
+        schedule(.getTouchSensor, after: 0.3)
     }
 
     func setNCMode(_ mode: NCMode) {
         guard initialized else { return }
-        sendNcasmSet(mode: mode)
+
+        sendNoiseControl(mode: mode)
         state.ncMode = mode
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.sendNcasmGet()
-        }
+        schedule(.getNoiseControl, after: 0.3)
     }
 
     func setAmbientLevel(_ level: Int) {
         guard initialized else { return }
-        let clamped = min(max(level, Self.ambientLevelRange.lowerBound),
-                          Self.ambientLevelRange.upperBound)
-        currentAmbientLevel = UInt8(clamped)
+
+        let clamped = min(
+            max(level, Self.ambientLevelRange.lowerBound),
+            Self.ambientLevelRange.upperBound
+        )
         state.ambientLevel = clamped
         guard state.ncMode == .ambient else { return }
-        sendNcasmSet(mode: .ambient)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.sendNcasmGet()
-        }
+
+        sendNoiseControl(mode: .ambient)
+        schedule(.getNoiseControl, after: 0.3)
     }
 
     func setAmbientFocusOnVoice(_ enabled: Bool) {
         guard initialized else { return }
-        asmId = enabled ? 0x01 : 0x00
+
         state.ambientFocusOnVoice = enabled
         guard state.ncMode == .ambient else { return }
-        sendNcasmSet(mode: .ambient)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.sendNcasmGet()
-        }
+
+        sendNoiseControl(mode: .ambient)
+        schedule(.getNoiseControl, after: 0.3)
     }
 
     func toggleSpeakToChat() {
         guard initialized else { return }
-        let next = !(state.speakToChatEnabled ?? false)
-        sendSpeakToChat(enabled: next)
-        state.speakToChatEnabled = next
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.sendSpeakToChatGet()
-        }
+
+        let enabled = !(state.speakToChatEnabled ?? false)
+        sendProtocolIntent(.setSpeakToChat(enabled))
+        state.speakToChatEnabled = enabled
+        schedule(.getSpeakToChat, after: 0.3)
     }
 
     func setEqPreset(_ id: UInt8) {
         guard initialized else { return }
-        sendPayload([Opcode.eqSetParam, Opcode.eqPresetInquiredType, id, 0x00],
-                    label: "EQ SET preset=0x\(String(format: "%02X", id))")
+
+        sendProtocolIntent(.setEqualizerPreset(id))
         state.eqCurrentPresetId = id
-        // Pull the resulting band curve for the new preset.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.sendEqGet()
-        }
+        schedule(.getEqualizer, after: 0.3)
     }
 
     func setEqBands(_ bands: [Int]) {
         guard initialized, !bands.isEmpty else { return }
-        // Custom band values must be sent under preset id UNSPECIFIED (0xFF),
-        // not CUSTOM (0xA0). 0xA0 is a volatile preview the device drops on
-        // the next SPP session; 0xFF makes it persist (this is what the Sony
-        // app does — see nf/c.java j(EqPresetId, int[])).
-        var payload: [UInt8] = [Opcode.eqSetParam, Opcode.eqPresetInquiredType,
-                                Opcode.eqPresetUnspecified, UInt8(bands.count)]
-        payload.append(contentsOf: bands.map { UInt8(clamping: $0) })
-        sendPayload(payload, label: "EQ SET custom bands=\(bands)")
-        state.eqCurrentPresetId = Opcode.eqPresetCustom
+
+        sendProtocolIntent(.setEqualizerBands(bands))
+        state.eqCurrentPresetId = SonyEqualizerPreset.customID
         state.eqBands = bands
     }
 
-    private func sendTouchSensor(enabled: Bool) {
-        let slot = touchPanelSlot ?? Opcode.gs1SubId  // best guess if not yet discovered
-        let settingType: UInt8 = touchPanelIsListType ? 0x02 : 0x01
-        sendPayload([Opcode.touchSensorSet, slot, settingType,
-                     enabled ? 0x01 : 0x00],
-                    label: "TouchSensor SET=\(enabled ? "ON" : "OFF") slot=\(String(format: "0x%02X", slot)) type=\(settingType == 2 ? "LIST" : "BOOL")")
+    private func handleReachability(_ reachable: Bool, name: String?) {
+        if let name {
+            deviceName = name
+        }
+        state.deviceReachable = reachable
+
+        if !state.isConnected {
+            state.statusDescription = reachable
+                ? "\(deviceName) (idle)"
+                : "Disconnected"
+        }
     }
 
-    private func sendTouchSensorGet() {
-        let slot = touchPanelSlot ?? Opcode.gs1SubId
-        sendPayload([Opcode.touchSensorGet, slot],
-                    label: "TouchSensor GET slot=\(String(format: "0x%02X", slot))")
-    }
-
-    private func sendNcasmGet() {
-        sendPayload([Opcode.ncasmGet, Opcode.ncasmCombinedInquiredType],
-                    label: "NCASM GET")
-    }
-
-    private func sendNcasmSet(mode: NCMode) {
-        // Payload: 68 02 effect ncType ncValue asmType asmId asmLevel
-        let effect: UInt8 = (mode == .off) ? 0x00 : 0x11   // OFF or ADJUSTMENT_COMPLETION
-        let ncValue: UInt8 = (mode == .noiseCancelling) ? 0x02 : 0x00 // DUAL or OFF
-        let asmLevel: UInt8 = (mode == .ambient) ? currentAmbientLevel : 0
-        let payload: [UInt8] = [
-            Opcode.ncasmSet,
-            Opcode.ncasmCombinedInquiredType,
-            effect,
-            ncSettingType,
-            ncValue,
-            asmSettingType,
-            asmId,
-            asmLevel,
-        ]
-        sendPayload(payload, label: "NCASM SET=\(mode.rawValue)")
-    }
-
-    private func sendSpeakToChatGet() {
-        sendPayload([Opcode.systemGet, Opcode.smartTalkingMode],
-                    label: "SpeakToChat GET")
-    }
-
-    private func sendSpeakToChat(enabled: Bool) {
-        sendPayload([Opcode.systemSet,
-                     Opcode.smartTalkingMode,
-                     Opcode.smartTalkingParamModeOnOff,
-                     enabled ? 0x01 : 0x00],
-                    label: "SpeakToChat SET=\(enabled ? "ON" : "OFF")")
+    private func sendNoiseControl(mode: NCMode) {
+        let settings = SonyNoiseControlSettings(
+            mode: mode,
+            ambientLevel: state.ambientLevel,
+            focusOnVoice: state.ambientFocusOnVoice
+        )
+        sendProtocolIntent(.setNoiseControl(settings))
     }
 
     private func sendPowerOff() {
-        // Pause first so audio doesn't briefly blast through the laptop
-        // speakers when A2DP drops as the headphones power down.
+        // Avoid a brief switch to the Mac speakers when A2DP disappears.
         media.pause()
-        sendPayload([Opcode.commonSetPowerOff,
-                     Opcode.powerOffFixedValue,
-                     Opcode.powerOffUserOff],
-                    label: "POWER_OFF")
+        sendProtocolIntent(.powerOff)
     }
 
-    private func queryGeneralSettingCapabilities() {
-        let slots: [UInt8] = [Opcode.gs1SubId, Opcode.gs2SubId, Opcode.gs3SubId]
-        for (i, slot) in slots.enumerated() {
-            let delay = 0.3 + Double(i) * 0.4
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.sendPayload([Opcode.gsGetCapability, slot, 0x00],
-                                  label: "GS GET_CAPABILITY slot=\(String(format: "0x%02X", slot))")
-            }
-        }
+    private func resetSessionState() {
+        initialized = false
+        awaitingInitResponse = false
+        outgoingSequence = 0
+        parser.reset()
+        protocolAdapter.reset()
     }
 
     private func sendInit() {
         awaitingInitResponse = true
-        sendPayload([Opcode.initRequest, 0x00], label: "INIT_REQUEST")
-        // Some firmware revisions need a second handshake before they
-        // accept feature SETs. 0x06 ... is INIT_2_REQUEST (Gadgetbridge
-        // PayloadTypeV1).
+        sendProtocolIntent(.startSession)
+
+        // Some V1 firmware needs a second handshake before accepting SETs.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self = self, self.awaitingInitResponse else { return }
-            self.sendPayload([0x06, 0x14, 0x01, 0x00, 0x00, 0x00, 0x00],
-                             label: "INIT_2_REQUEST")
+            guard let self, self.awaitingInitResponse else { return }
+            self.sendProtocolIntent(.continueSessionInitialization)
         }
-        // Fallback: complete init even if no canonical INIT_REPLY arrives.
-        // The awaitingInitResponse check makes the timeout a no-op if
-        // the session was reset (disconnect/failure) before it fired.
+
+        // A few revisions send a state dump instead of the canonical reply.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self = self,
+            guard let self,
                   self.awaitingInitResponse,
-                  !self.initialized else { return }
+                  !self.initialized else {
+                return
+            }
             FileLogger.shared.log("state", "INIT timeout — completing anyway")
             self.completeInit()
         }
@@ -343,57 +227,66 @@ final class HeadphonesController {
 
     private func completeInit() {
         guard !initialized else { return }
+
         initialized = true
         awaitingInitResponse = false
         state.isConnected = true
         state.statusDescription = "Connected: \(deviceName)"
-        FileLogger.shared.log("state", "INIT complete, discovering features")
+        FileLogger.shared.log(
+            "state",
+            "INIT complete with \(protocolAdapter.version.rawValue.uppercased()), discovering features"
+        )
+
         queryGeneralSettingCapabilities()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.sendNcasmGet()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { [weak self] in
-            self?.sendSpeakToChatGet()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.9) { [weak self] in
-            self?.sendBatteryGet()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.1) { [weak self] in
-            self?.sendEqCapabilityGet()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.3) { [weak self] in
-            self?.sendEqGet()
-        }
+        schedule(.getNoiseControl, after: 1.5)
+        schedule(.getSpeakToChat, after: 1.7)
+        schedule(.getBattery, after: 1.9)
+        schedule(.getEqualizerCapabilities, after: 2.1)
+        schedule(.getEqualizer, after: 2.3)
         autoOff.arm(deviceName: deviceName)
     }
 
-    private func sendBatteryGet() {
-        sendPayload([Opcode.batteryGet, Opcode.batterySingleInquiredType],
-                    label: "BATTERY GET")
+    private func queryGeneralSettingCapabilities() {
+        let requests = protocolAdapter.makeRequests(for: .discoverGeneralSettings)
+        for (index, request) in requests.enumerated() {
+            let delay = 0.3 + Double(index) * 0.4
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.sendProtocolRequest(request)
+            }
+        }
     }
 
-    private func sendEqCapabilityGet() {
-        sendPayload([Opcode.eqGetCapability, Opcode.eqPresetInquiredType, 0x00],
-                    label: "EQ GET_CAPABILITY")
+    private func schedule(_ intent: SonyProtocolIntent, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.sendProtocolIntent(intent)
+        }
     }
 
-    private func sendEqGet() {
-        sendPayload([Opcode.eqGetParam, Opcode.eqPresetInquiredType], label: "EQ GET")
+    private func sendProtocolIntent(_ intent: SonyProtocolIntent) {
+        sendProtocolRequests(protocolAdapter.makeRequests(for: intent))
     }
 
-    private func sendPayload(_ payload: [UInt8], label: String) {
-        // Suppress sends if the BT layer has dropped — avoids a flood of
-        // "NO CHANNEL" lines after a mid-init disconnect.
+    private func sendProtocolRequests(_ requests: [SonyProtocolRequest]) {
+        requests.forEach(sendProtocolRequest)
+    }
+
+    private func sendProtocolRequest(_ request: SonyProtocolRequest) {
         guard case .connected = bluetooth.status else {
-            FileLogger.shared.log("cmd", "skip \(label): not connected")
+            FileLogger.shared.log("cmd", "skip \(request.label): not connected")
             return
         }
-        let packet = SonyPacket(dataType: .command1,
-                                sequence: outgoingSequence,
-                                payload: payload)
+
+        let packet = SonyPacket(
+            dataType: request.dataType,
+            sequence: outgoingSequence,
+            payload: request.payload
+        )
         outgoingSequence ^= 1
-        let hex = payload.map { String(format: "%02X", $0) }.joined(separator: " ")
-        FileLogger.shared.log("cmd", "\(label) payload=[\(hex)]")
+
+        let hex = request.payload
+            .map { String(format: "%02X", $0) }
+            .joined(separator: " ")
+        FileLogger.shared.log("cmd", "\(request.label) payload=[\(hex)]")
         bluetooth.send(SonyFraming.encode(packet))
     }
 
@@ -403,28 +296,19 @@ final class HeadphonesController {
             resetSessionState()
             autoOff.disarm()
             policy.setCurrentlyConnected(false)
-            state.isConnected = false
-            state.touchSensorEnabled = nil
-            state.ncMode = nil
-            state.speakToChatEnabled = nil
-            state.batteryLevel = nil
-            state.batteryCharging = false
-            state.eqPresets = []
-            state.eqCurrentPresetId = nil
-            state.eqBands = []
-            // Device may still be present (we just closed SPP for battery
-            // saving) — reflect that instead of a flat "Disconnected".
-            state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
+            clearReportedDeviceState()
+            state.statusDescription = state.deviceReachable
+                ? "\(deviceName) (idle)"
+                : "Disconnected"
+
         case .searching, .connecting:
-            // Transient. Don't overwrite the current statusDescription —
-            // it lingers as "Disconnected" until we actually succeed.
-            // This avoids the misleading "Connecting to WH-1000XM4…"
-            // shown while IOBluetooth is timing out an unreachable
-            // device.
+            // Do not advertise a successful connection while IOBluetooth is
+            // still timing out an unreachable device.
             state.isConnected = false
-            if case let .connecting(name) = status {
+            if case .connecting(let name) = status {
                 deviceName = name
             }
+
         case .connected(let name):
             resetSessionState()
             deviceName = name
@@ -433,251 +317,142 @@ final class HeadphonesController {
             state.deviceReachable = true
             state.statusDescription = "Initializing \(name)..."
             sendInit()
+
         case .failed:
             resetSessionState()
             autoOff.disarm()
             policy.setCurrentlyConnected(false)
-            state.isConnected = false
-            state.touchSensorEnabled = nil
-            state.ncMode = nil
-            state.speakToChatEnabled = nil
-            state.batteryLevel = nil
-            state.batteryCharging = false
-            state.eqPresets = []
-            state.eqCurrentPresetId = nil
-            state.eqBands = []
-            state.statusDescription = state.deviceReachable ? "\(deviceName) (idle)" : "Disconnected"
+            clearReportedDeviceState()
+            state.statusDescription = state.deviceReachable
+                ? "\(deviceName) (idle)"
+                : "Disconnected"
         }
     }
 
+    private func clearReportedDeviceState() {
+        state.isConnected = false
+        state.touchSensorEnabled = nil
+        state.ncMode = nil
+        state.speakToChatEnabled = nil
+        state.batteryLevel = nil
+        state.batteryCharging = false
+        state.eqPresets = []
+        state.eqCurrentPresetId = nil
+        state.eqBands = []
+    }
+
     private func handleIncoming(_ data: Data) {
-        let packets = parser.feed(data)
-        for packet in packets {
-            let hex = packet.payload.map { String(format: "%02X", $0) }.joined(separator: " ")
-            FileLogger.shared.log("packet", "RX type=0x\(String(format: "%02X", packet.dataType.rawValue)) seq=\(packet.sequence) payload=[\(hex)]")
+        for packet in parser.feed(data) {
+            let payload = packet.payload
+                .map { String(format: "%02X", $0) }
+                .joined(separator: " ")
+            FileLogger.shared.log(
+                "packet",
+                "RX type=\(hex(packet.dataType.rawValue)) seq=\(packet.sequence) payload=[\(payload)]"
+            )
+
             if packet.dataType != .ack {
-                let ack = SonyPacket(dataType: .ack,
-                                     sequence: packet.sequence ^ 1,
-                                     payload: [])
+                let ack = SonyPacket(
+                    dataType: .ack,
+                    sequence: packet.sequence ^ 1,
+                    payload: []
+                )
                 bluetooth.send(SonyFraming.encode(ack))
             }
+
             interpret(packet)
         }
     }
 
     private func interpret(_ packet: SonyPacket) {
-        guard packet.dataType == .command1, let opcode = packet.payload.first else {
+        guard packet.dataType == .command1,
+              !packet.payload.isEmpty else {
             return
         }
-        // Canonical V1 INIT_REPLY (0x01 ...) OR any state-dump packet that
-        // arrives after we sent INIT_REQUEST both signal "device is ready".
+
+        // A canonical reply or an early state dump both prove the V1 device
+        // is ready. Session negotiation will own this rule once V2 is added.
         if awaitingInitResponse {
             completeInit()
         }
-        switch opcode {
-        case Opcode.gsRetCapability:
-            parseGsCapability(packet.payload)
-        case Opcode.batteryRet, Opcode.batteryNotify:
-            parseBattery(packet.payload)
-        case Opcode.eqRetCapability:
-            parseEqCapability(packet.payload)
-        case Opcode.eqRetParam, Opcode.eqNotifyParam:
-            parseEqParam(packet.payload)
-        case Opcode.ncasmRet, Opcode.ncasmNotify:
-            parseNcasm(packet.payload)
-        case Opcode.systemRet, Opcode.systemNotify:
-            parseSystem(packet.payload)
-        case Opcode.touchSensorRet:
-            if packet.payload.count >= 4 {
-                let slot = packet.payload[1]
-                let type = packet.payload[2]
-                let raw = packet.payload[3]
-                FileLogger.shared.log("state", "GS RET slot=\(String(format: "0x%02X", slot)) type=\(type) value=\(String(format: "0x%02X", raw))")
-                if slot == (touchPanelSlot ?? 0xFF) {
-                    let enabled = raw != 0
-                    state.touchSensorEnabled = enabled
-                    FileLogger.shared.log("state", "TouchSensor RET = \(enabled ? "ON" : "OFF")")
-                }
+
+        let output = protocolAdapter.decode(packet)
+        output.events.forEach(applyProtocolEvent)
+        sendProtocolRequests(output.requests)
+    }
+
+    private func applyProtocolEvent(_ event: SonyProtocolEvent) {
+        switch event {
+        case .battery(let level, let charging):
+            state.batteryLevel = level
+            state.batteryCharging = charging
+            FileLogger.shared.log(
+                "state",
+                "Battery = \(level)% charging=\(charging)"
+            )
+
+        case .noiseControl(let settings):
+            state.ncMode = settings.mode
+            state.ambientLevel = settings.ambientLevel
+            state.ambientFocusOnVoice = settings.focusOnVoice
+            FileLogger.shared.log(
+                "state",
+                "NCASM = \(settings.mode.rawValue), level=\(settings.ambientLevel), focus=\(settings.focusOnVoice)"
+            )
+
+        case .speakToChat(let enabled):
+            state.speakToChatEnabled = enabled
+            FileLogger.shared.log(
+                "state",
+                "SpeakToChat = \(enabled ? "ON" : "OFF")"
+            )
+
+        case .touchSensor(let enabled):
+            state.touchSensorEnabled = enabled
+            FileLogger.shared.log(
+                "state",
+                "TouchSensor = \(enabled ? "ON" : "OFF")"
+            )
+
+        case .equalizerCapabilities(let presets):
+            state.eqPresets = presets
+            let description = presets
+                .map { "\($0.name)=\(hex($0.id))" }
+                .joined(separator: ", ")
+            FileLogger.shared.log("state", "EQ presets: \(description)")
+
+        case .equalizer(let presetId, let bands):
+            state.eqCurrentPresetId = presetId
+            state.eqBands = bands
+            FileLogger.shared.log(
+                "state",
+                "EQ current=\(hex(presetId)) bands=\(bands)"
+            )
+
+        case .generalSettingCapability(let capability):
+            let typeName: String
+            switch capability.valueType {
+            case .boolean:
+                typeName = "BOOLEAN"
+            case .list:
+                typeName = "LIST"
+            case .unknown(let value):
+                typeName = "UNKNOWN(\(hex(value)))"
             }
-        case Opcode.touchSensorNotify:
-            if packet.payload.count >= 4 {
-                let slot = packet.payload[1]
-                let raw = packet.payload[3]
-                FileLogger.shared.log("state", "GS NTFY slot=\(String(format: "0x%02X", slot)) value=\(String(format: "0x%02X", raw))")
+            FileLogger.shared.log(
+                "state",
+                "GS slot=\(hex(capability.slot)) name='\(capability.name)' nameFormat=\(capability.nameFormat) settingType=\(typeName)"
+            )
+            if capability.name == "TOUCH_PANEL_SETTING" {
+                FileLogger.shared.log(
+                    "state",
+                    "→ Touch panel discovered at slot \(hex(capability.slot)), type=\(typeName)"
+                )
             }
-        default:
-            break
         }
     }
 
-    private func parseGsCapability(_ payload: [UInt8]) {
-        // Format: [D1][slot][stringFormat][nameLen][name...][descLen][desc...][gsSettingType][listData?]
-        guard payload.count >= 5 else {
-            FileLogger.shared.log("state", "GS RET_CAPABILITY too short")
-            return
-        }
-        let slot = payload[1]
-        let nameFormat = payload[2]
-        let nameLen = Int(payload[3])
-        guard payload.count >= 4 + nameLen + 1 else { return }
-        let nameBytes = Array(payload[4..<(4 + nameLen)])
-        let name = String(bytes: nameBytes, encoding: .ascii) ?? "<bad>"
-
-        let descLenIdx = 4 + nameLen
-        let descLen = Int(payload[descLenIdx])
-        let descEnd = descLenIdx + 1 + descLen
-        guard payload.count > descEnd else { return }
-        let settingType = payload[descEnd]
-        let typeName = settingType == 1 ? "BOOLEAN" : settingType == 2 ? "LIST" : "?"
-
-        FileLogger.shared.log("state",
-            "GS slot=\(String(format: "0x%02X", slot)) name='\(name)' nameFormat=\(nameFormat) settingType=\(typeName)")
-
-        // ENUM_NAME (format=2) + name="TOUCH_PANEL_SETTING" identifies the slot.
-        if nameFormat == 0x02 && name == "TOUCH_PANEL_SETTING" {
-            touchPanelSlot = slot
-            touchPanelIsListType = (settingType == 2)
-            FileLogger.shared.log("state",
-                "→ Touch panel discovered at slot \(String(format: "0x%02X", slot)), type=\(typeName)")
-            // Now that we know the slot, query the current state.
-            sendTouchSensorGet()
-        }
-    }
-
-    private func parseNcasm(_ payload: [UInt8]) {
-        // RET / NOTIFY format for inquiredType=0x02 NOISE_CANCELLING_AND_AMBIENT_SOUND_MODE:
-        // [0]=opcode 0x67/0x69, [1]=inquiredType, [2]=effect, [3]=ncSettingType,
-        // [4]=ncValue/dualSingle, [5]=asmSettingType, [6]=asmId, [7]=asmLevel
-        guard payload.count >= 8,
-              payload[1] == Opcode.ncasmCombinedInquiredType else { return }
-        let effect = payload[2]
-        ncSettingType = payload[3]
-        let ncValue = payload[4]
-        asmSettingType = payload[5]
-        asmId = payload[6]
-        let reportedAmbientLevel = payload[7]
-
-        let mode: NCMode
-        if effect == 0x00 {
-            mode = .off
-        } else if ncValue != 0x00 {
-            mode = .noiseCancelling
-        } else {
-            // Ambient level 0 is valid. The active effect combined with NC
-            // being disabled is what identifies Ambient mode.
-            mode = .ambient
-        }
-        if mode == .ambient,
-           Self.ambientLevelRange.contains(Int(reportedAmbientLevel)) {
-            currentAmbientLevel = reportedAmbientLevel
-        }
-        state.ncMode = mode
-        state.ambientLevel = Int(currentAmbientLevel)
-        state.ambientFocusOnVoice = (asmId == 0x01)
-        FileLogger.shared.log("state",
-            "NCASM = \(mode.rawValue) (effect=\(String(format: "0x%02X", effect)) ncT=\(ncSettingType) ncV=\(ncValue) asmT=\(asmSettingType) asmL=\(reportedAmbientLevel))")
-    }
-
-    private func parseBattery(_ payload: [UInt8]) {
-        // RET / NOTIFY for single-battery devices:
-        // [0]=opcode 0x11/0x13, [1]=BatteryInquiredType (0=BATTERY),
-        // [2]=level (0..100), [3]=charging status (0 no, 1 yes, F0 unknown)
-        guard payload.count >= 4,
-              payload[1] == Opcode.batterySingleInquiredType else { return }
-        let level = Int(payload[2])
-        let charging = payload[3] == 0x01
-        state.batteryLevel = level
-        state.batteryCharging = charging
-        FileLogger.shared.log("state", "Battery = \(level)% charging=\(charging)")
-    }
-
-    private func parseEqCapability(_ payload: [UInt8]) {
-        // [0]=0x51 [1]=inquiredType [2]=bandCount [3]=levelSteps
-        // [4]=presetCount, then per preset: [presetId][nameLen][name…]
-        guard payload.count >= 5, payload[1] == Opcode.eqPresetInquiredType else { return }
-        let presetCount = Int(payload[4])
-        var presets: [EqPreset] = []
-        var i = 5
-        for _ in 0..<presetCount {
-            guard i + 1 < payload.count else { break }
-            let id = payload[i]
-            let nameLen = Int(payload[i + 1])
-            let nameStart = i + 2
-            let nameEnd = nameStart + nameLen
-            guard nameEnd <= payload.count else { break }
-            let capName = nameLen > 0
-                ? String(bytes: payload[nameStart..<nameEnd], encoding: .utf8)
-                : nil
-            let name = (capName?.isEmpty == false) ? capName! : Self.fallbackPresetName(id)
-            presets.append(EqPreset(id: id, name: name))
-            i = nameEnd
-        }
-        // Drop the USER_SETTING1…5 slots (0xA1–0xA5) — not useful here.
-        presets.removeAll { $0.id >= 0xA1 && $0.id <= 0xA5 }
-        // Move the manually-editable "Custom" preset to the very end of
-        // the list — it's the one the band sliders write to.
-        if let idx = presets.firstIndex(where: { $0.id == Opcode.eqPresetCustom }) {
-            presets.append(presets.remove(at: idx))
-        }
-        state.eqPresets = presets
-        FileLogger.shared.log("state", "EQ presets: \(presets.map { "\($0.name)=0x\(String(format: "%02X", $0.id))" }.joined(separator: ", "))")
-    }
-
-    private func parseEqParam(_ payload: [UInt8]) {
-        // [0]=0x57/0x59 [1]=inquiredType [2]=presetId [3]=nBands [4…]=band values
-        guard payload.count >= 4, payload[1] == Opcode.eqPresetInquiredType else { return }
-        let presetId = payload[2]
-        let nBands = Int(payload[3])
-        var bands: [Int] = []
-        if 4 + nBands <= payload.count {
-            bands = payload[4..<(4 + nBands)].map { Int($0) }
-        }
-        state.eqCurrentPresetId = presetId
-        state.eqBands = bands
-        FileLogger.shared.log("state", "EQ current=0x\(String(format: "%02X", presetId)) bands=\(bands)")
-    }
-
-    static func fallbackPresetName(_ id: UInt8) -> String {
-        switch id {
-        case 0x00: return "Off"
-        case 0x01: return "Rock"
-        case 0x02: return "Pop"
-        case 0x03: return "Jazz"
-        case 0x04: return "Dance"
-        case 0x05: return "EDM"
-        case 0x06: return "R&B / Hip-Hop"
-        case 0x07: return "Acoustic"
-        case 0x10: return "Bright"
-        case 0x11: return "Excited"
-        case 0x12: return "Mellow"
-        case 0x13: return "Relaxed"
-        case 0x14: return "Vocal"
-        case 0x15: return "Treble Boost"
-        case 0x16: return "Bass Boost"
-        case 0x17: return "Speech"
-        case 0xA0: return "Custom"
-        case 0xA1: return "User 1"
-        case 0xA2: return "User 2"
-        case 0xA3: return "User 3"
-        case 0xA4: return "User 4"
-        case 0xA5: return "User 5"
-        default: return String(format: "Preset 0x%02X", id)
-        }
-    }
-
-    private func parseSystem(_ payload: [UInt8]) {
-        // SystemInquiredType is at [1]. Payload structure after that
-        // depends on whether this is RET or NTFY:
-        //   RET (0xF7): [SmartTalkingModeSettingType=0x00 ON_OFF] [value]
-        //   NTFY (0xF9): [SmartTalkingModeParameterType=0x01 MODE_ON_OFF] [value]
-        // We accept both — middle byte logged for diagnostics, value at [3].
-        guard payload.count >= 4,
-              payload[1] == Opcode.smartTalkingMode else { return }
-        let middle = payload[2]
-        let raw = payload[3]
-        let enabled = raw != 0
-        state.speakToChatEnabled = enabled
-        FileLogger.shared.log("state",
-            "SpeakToChat = \(enabled ? "ON" : "OFF") (mid=\(String(format: "0x%02X", middle)))")
+    private func hex(_ byte: UInt8) -> String {
+        String(format: "0x%02X", byte)
     }
 }

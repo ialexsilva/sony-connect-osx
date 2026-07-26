@@ -5,8 +5,13 @@ let package = Package(
     name: "SonyConnect",
     platforms: [.macOS(.v12)],
     targets: [
+        .target(
+            name: "SonyConnectCore",
+            path: "Sources/SonyConnectCore"
+        ),
         .executableTarget(
             name: "SonyConnect",
+            dependencies: ["SonyConnectCore"],
             path: "Sources/SonyConnect",
             linkerSettings: [
                 .linkedFramework("AppKit"),
@@ -14,6 +19,11 @@ let package = Package(
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("Foundation"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "SonyConnectCoreTests",
+            dependencies: ["SonyConnectCore"],
+            path: "Tests/SonyConnectCoreTests"
+        ),
     ]
 )
