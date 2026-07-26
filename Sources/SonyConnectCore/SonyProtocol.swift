@@ -5,6 +5,54 @@ public enum SonyProtocolVersion: String, Equatable {
     case v2
 }
 
+/// Sony's two proprietary RFCOMM service endpoints.
+///
+/// The endpoint is a strong protocol hint, while the initialization reply is
+/// the authoritative version signal whenever it is available.
+public enum SonyServiceEndpoint: String, CaseIterable, Equatable {
+    case v1
+    case v2
+
+    /// Keeps the hardware-verified XM3/XM4 path preferred when a device
+    /// advertises both endpoints. Devices exposing only V2 still select V2.
+    public static let connectionPriority: [SonyServiceEndpoint] = [.v1, .v2]
+
+    public var protocolVersion: SonyProtocolVersion {
+        switch self {
+        case .v1: return .v1
+        case .v2: return .v2
+        }
+    }
+
+    public var uuidString: String {
+        switch self {
+        case .v1: return "96CC203E-5068-46AD-B32D-E316F5E069BA"
+        case .v2: return "956C7B26-D49A-4BA8-B03F-B17D393CB6E2"
+        }
+    }
+
+    public var uuidBytes: [UInt8] {
+        switch self {
+        case .v1:
+            return [
+                0x96, 0xCC, 0x20, 0x3E,
+                0x50, 0x68,
+                0x46, 0xAD,
+                0xB3, 0x2D,
+                0xE3, 0x16, 0xF5, 0xE0, 0x69, 0xBA,
+            ]
+        case .v2:
+            return [
+                0x95, 0x6C, 0x7B, 0x26,
+                0xD4, 0x9A,
+                0x4B, 0xA8,
+                0xB0, 0x3F,
+                0xB1, 0x7D, 0x39, 0x3C, 0xB6, 0xE2,
+            ]
+        }
+    }
+}
+
 public enum SonyNoiseControlMode: String, Equatable {
     case noiseCancelling
     case ambient

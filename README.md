@@ -1,6 +1,6 @@
-# SonyConnect MacOS
+# SonyConnect macOS
 
-A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth — toggle the touch panel, switch between Noise Cancelling / Ambient Sound / Off, adjust the Ambient Sound level and Focus on Voice, turn Speak-to-Chat on or off, and power the headphones off on demand or automatically after an idle window, all from the menu bar.
+A macOS menu-bar app that controls Sony headphones using the first-generation proprietary protocol used by the WH-1000XM3/XM4 — toggle the touch panel, switch between Noise Cancelling / Ambient Sound / Off, adjust the Ambient Sound level and Focus on Voice, turn Speak-to-Chat on or off, and power the headphones off on demand or automatically after an idle window, all from the menu bar.
 
 <img width="265" height="305" alt="image" src="https://github.com/user-attachments/assets/16ec2f0d-85c1-4ef6-abfa-af35522f731b" />
 
@@ -8,7 +8,7 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
 
 ## Features
 
-- Watches for a paired Sony WH-1000XM4 and opens the control channel on demand when audio starts or the menu is opened
+- Watches for a paired Sony WH-1000XM3/XM4/XM5/XM6 and opens a known Sony control channel on demand when audio starts or the menu is opened
 - Menu-bar UI:
   - **Touch Sensor** (enable / disable the right-earcup swipe panel)
   - **Noise Cancelling** — On / Ambient Sound / Off, with Ambient level (1–20) and Focus on Voice controls
@@ -24,9 +24,9 @@ A macOS menu-bar app that controls Sony WH-1000XM4 headphones over Bluetooth —
 
 ## Supported headphones
 
-Built and tested on **Sony WH-1000XM4**. The current transport and command implementation targets Sony's first-generation MDR protocol. The WH-1000XM3 uses the same protocol family and is detected, but is not hardware-verified here.
+Built and tested on **Sony WH-1000XM4**. The WH-1000XM3 uses the same V1 protocol family and is detected, but is not hardware-verified here.
 
-The protocol code is now isolated behind a versioned adapter boundary, but only the V1 adapter is implemented and selected. The name-matching list currently detects the WH-1000XM5 as well, but XM5/XM6 support still requires Sony's second-generation service UUID, protocol negotiation, and V2 command layouts. Device detection alone does not imply feature support.
+The transport recognizes both Sony RFCOMM endpoints and negotiates V1 versus V2 from the initialization reply. Only `SonyProtocolV1` is implemented today. A V2 device such as XM5/XM6 is detected explicitly and placed in an unsupported state without receiving V1 feature commands; full XM5/XM6 support still requires the V2 adapter and hardware traces. Device detection alone does not imply feature support.
 
 ## Requirements
 
@@ -49,7 +49,7 @@ That:
 
 On first launch macOS will ask for Bluetooth permission — approve it once.
 
-Run the framing and V1 protocol contract tests with `make test`. `make clean` removes build artefacts.
+Run the framing, protocol-session, and V1 adapter contract tests with `make test`. `make clean` removes build artefacts.
 
 ## Usage
 
@@ -65,7 +65,12 @@ While the headphones are connected to the Mac at the Bluetooth level, a headphon
 
 ## How it works
 
-Sony headphones expose a proprietary RFCOMM service (advertised as "Serial HPC", UUID `96CC203E-5068-46AD-B32D-E316F5E069BA`) on top of classic Bluetooth. Frames look like this:
+Sony headphones expose proprietary RFCOMM services on top of classic Bluetooth:
+
+- V1: `96CC203E-5068-46AD-B32D-E316F5E069BA` (advertised as "Serial HPC")
+- V2: `956C7B26-D49A-4BA8-B03F-B17D393CB6E2`
+
+Frames look like this:
 
 ```
 0x3E  data_type  seq  len(BE32)  payload  checksum  0x3C
@@ -73,15 +78,16 @@ Sony headphones expose a proprietary RFCOMM service (advertised as "Serial HPC",
 
 `0x3C` / `0x3D` / `0x3E` bytes inside the body are escape-encoded: prefixed with `0x3D` and XOR-ed with `0xEF`. The checksum is the sum of all body bytes mod 256.
 
-After RFCOMM opens, the app:
+After RFCOMM opens, the protocol session:
 
-1. Sends `INIT_REQUEST` (`00 00`) and waits for any response — different firmware revisions answer with anything from the canonical `01 00 40 10` to a stream of unsolicited state pushes.
-2. Sends `GENERAL_SETTING_GET_CAPABILITY` (`D0 D1 00`, `D0 D2 00`, `D0 D3 00`) for each "general settings" slot, parses the responses, and looks for an ASCII `TOUCH_PANEL_SETTING` name — that's the slot used for the touch panel toggle on this particular device.
-3. Queries NCASM (`66 02`) and Smart Talking Mode (`F6 05`) for initial state.
+1. Tries the known service endpoints in a compatibility-safe order and sends `INIT_REQUEST` (`00 00`).
+2. Uses the canonical reply length (four bytes for V1, eight for V2) when available, with service context and a legacy V1 state-push fallback.
+3. Serializes requests so only one command waits for an ACK at a time, retries a timed-out frame, and fails closed after the configured attempt limit.
 4. Acknowledges every non-ACK packet with the opposite sequence number (Sony's "expected next seq" convention).
-5. Listens for NOTIFY opcodes (`D9`, `69`, `F9`) to keep the UI in sync when the user changes settings via the physical buttons or another connected device.
+5. For V1, discovers general-setting capabilities, queries NCASM, Smart Talking Mode, battery and equalizer state, and listens for NOTIFY packets to keep the UI synchronized.
+6. For V2, reports that the protocol was detected but does not send feature commands until `SonyProtocolV2` is implemented.
 
-SET commands:
+V1 SET commands:
 
 | Feature             | Payload                                                                   |
 | ------------------- | ------------------------------------------------------------------------- |
@@ -98,15 +104,17 @@ SET commands:
 
 ## Architecture
 
-Bluetooth and macOS lifecycle code stay in the app target. Framing, protocol-neutral intents/events, and every V1 opcode live in the Foundation-only `SonyConnectCore` target:
+Bluetooth and macOS lifecycle code stay in the app target. Framing, negotiation, ACK/retry behavior, protocol-neutral intents/events, and every V1 opcode live in `SonyConnectCore`:
 
 ```
-BluetoothClient → SonyFrameParser → HeadphonesController → SonyProtocolAdapter
-                                              ↕
-                                       SonyProtocolV1
+BluetoothClient → HeadphonesController → SonyProtocolSession
+                                            │
+                                            ├── framing / ACK / queue / retries
+                                            └── SonyProtocolAdapter
+                                                      └── SonyProtocolV1
 ```
 
-`HeadphonesController` asks for operations such as `getBattery` or `setNoiseControl`; the adapter owns the wire payload and converts replies into typed events. This is the seam where `SonyProtocolV2` will be added. Unknown frame types retain their raw value instead of being silently decoded as V1.
+`HeadphonesController` submits operations such as `getBattery` or `setNoiseControl`; the session owns wire reliability and the selected adapter owns protocol payloads and converts replies into typed events. This is the seam where `SonyProtocolV2` will be added. Unknown frame types retain their raw value instead of being silently decoded as V1.
 
 The invariants and next V2 implementation slice are documented in [`docs/PROTOCOL_ARCHITECTURE.md`](docs/PROTOCOL_ARCHITECTURE.md).
 
@@ -116,12 +124,13 @@ The invariants and next V2 implementation slice are documented in [`docs/PROTOCO
 Sources/SonyConnectCore/
   SonyPacket.swift           — shared frame encoding / incremental stream parser
   SonyProtocol.swift         — protocol-neutral intents, requests, events, adapter contract
+  SonyProtocolSession.swift  — negotiation, ACK correlation, queueing, timeout and retries
   SonyProtocolV1.swift       — complete V1 payload encoder/decoder used by the app
 Sources/SonyConnect/
   main.swift               — NSApplication bootstrap (.accessory mode, no Dock icon)
   AppDelegate.swift        — Owns the menu bar controller
   MenuBarController.swift  — NSStatusItem, menu, click routing
-  HeadphonesController.swift — Bluetooth session orchestration + UI-facing state
+  HeadphonesController.swift — transport/protocol coordination + UI-facing state
   BluetoothClient.swift    — IOBluetooth RFCOMM wrapper, SDP query, ACL reachability
   ConnectionPolicy.swift   — lazy connect + idle disconnect (battery saving)
   AudioActivityMonitor.swift — CoreAudio "is the device playing" probe
@@ -132,7 +141,7 @@ Sources/SonyConnect/
   ScrollableSlider.swift   — stepped sliders with coalesced scroll-wheel support
   SupportedDevices.swift   — device name hints
   FileLogger.swift         — Plain-text log to ~/Library/Logs/SonyConnect.log
-Tests/SonyConnectCoreTests/ — framing and V1 adapter contract tests
+Tests/SonyConnectCoreTests/ — framing, session, and V1 adapter contract tests
 Resources/Info.plist       — LSUIElement + NSBluetoothAlwaysUsageDescription
 Makefile                   — build, test, app, run, clean
 Package.swift              — Swift Package Manager manifest
@@ -142,6 +151,7 @@ Package.swift              — Swift Package Manager manifest
 
 - Ad-hoc codesigned only — not notarized, not signed for distribution. Re-sign before sharing the `.app` with anyone else.
 - Connects to the first matching paired device. Multi-device routing not implemented.
+- V2 transport detection is implemented, but V2 feature commands are intentionally disabled until the V2 adapter is complete and hardware-verified.
 - Only the features above are wired up. Multipoint, firmware controls, configurable auto-power-off duration, voice guidance, wear detection, etc. are protocol-supported but unimplemented.
 - The Sony protocol is reverse-engineered — a firmware update can change opcodes. If the touch toggle stops doing anything physical, check `~/Library/Logs/SonyConnect.log` for the device's capability response and adapt.
 

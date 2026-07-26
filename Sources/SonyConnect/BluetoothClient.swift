@@ -1,15 +1,7 @@
 import Foundation
 import IOBluetooth
 import OSLog
-
-// Sony's proprietary RFCOMM service UUID used by WH-1000XM4 and related models.
-private let sonyServiceUUIDBytes: [UInt8] = [
-    0x96, 0xCC, 0x20, 0x3E,
-    0x50, 0x68,
-    0x46, 0xAD,
-    0xB3, 0x2D,
-    0xE3, 0x16, 0xF5, 0xE0, 0x69, 0xBA,
-]
+import SonyConnectCore
 
 private let log = Logger(subsystem: "com.tanat.sonyconnect", category: "bluetooth")
 
@@ -18,8 +10,27 @@ final class BluetoothClient: NSObject {
         case disconnected
         case searching
         case connecting(deviceName: String)
-        case connected(deviceName: String)
+        case connected(
+            deviceName: String,
+            endpoint: SonyServiceEndpoint
+        )
         case failed(reason: String)
+    }
+
+    private enum ServiceOpenResult {
+        case opened
+        case notFound
+        case failed(reason: String)
+    }
+
+    private enum ServiceCandidateOpenResult {
+        case opened
+        case exhausted(reason: String)
+    }
+
+    private struct ServiceCandidate {
+        let endpoint: SonyServiceEndpoint
+        let channelID: BluetoothRFCOMMChannelID
     }
 
     var onStatus: ((Status) -> Void)?
@@ -31,6 +42,9 @@ final class BluetoothClient: NSObject {
 
     private var channel: IOBluetoothRFCOMMChannel?
     private var device: IOBluetoothDevice?
+    private var activeEndpoint: SonyServiceEndpoint?
+    private var pendingServiceCandidates: [ServiceCandidate] = []
+    private var lastServiceOpenFailure: String?
     private var reconnectTimer: Timer?
     private var suppressAutoReconnect = false
     private var connectNotification: IOBluetoothUserNotification?
@@ -112,6 +126,9 @@ final class BluetoothClient: NSObject {
         cancelReconnect()
         if case .connected = status { return }
         if case .connecting = status { return }
+        activeEndpoint = nil
+        pendingServiceCandidates.removeAll(keepingCapacity: true)
+        lastServiceOpenFailure = nil
         status = .searching
 
         guard let target = targetPairedDevice() else {
@@ -123,9 +140,17 @@ final class BluetoothClient: NSObject {
         let name = target.name ?? target.addressString ?? "Sony headphones"
         status = .connecting(deviceName: name)
 
-        if findServiceAndOpen(device: target) { return }
+        switch findServiceAndOpen(device: target) {
+        case .opened:
+            return
+        case .failed(let reason):
+            status = .failed(reason: reason)
+            return
+        case .notFound:
+            break
+        }
 
-        log.info("Service record not cached; performing SDP query")
+        log.info("Sony service records not cached; performing SDP query")
         if target.performSDPQuery(self) != kIOReturnSuccess {
             status = .failed(reason: "SDP query failed to start")
         }
@@ -137,6 +162,9 @@ final class BluetoothClient: NSObject {
         channel?.close()
         channel = nil
         device = nil
+        activeEndpoint = nil
+        pendingServiceCandidates.removeAll(keepingCapacity: true)
+        lastServiceOpenFailure = nil
         status = .disconnected
     }
 
@@ -182,76 +210,209 @@ final class BluetoothClient: NSObject {
         }
     }
 
-    @discardableResult
-    private func findServiceAndOpen(device: IOBluetoothDevice) -> Bool {
-        let uuid = IOBluetoothSDPUUID(bytes: sonyServiceUUIDBytes, length: sonyServiceUUIDBytes.count)
-        guard let record = device.getServiceRecord(for: uuid) else {
-            FileLogger.shared.log("bt", "Sony service UUID not found in cached SDP records")
-            if let allRecords = device.services as? [IOBluetoothSDPServiceRecord] {
-                for r in allRecords {
-                    var ch: BluetoothRFCOMMChannelID = 0
-                    let ok = r.getRFCOMMChannelID(&ch) == kIOReturnSuccess
-                    FileLogger.shared.log("bt", "  service: \(r.getServiceName() ?? "?") rfcomm=\(ok ? String(ch) : "no")")
-                }
+    private func findServiceAndOpen(
+        device: IOBluetoothDevice
+    ) -> ServiceOpenResult {
+        var foundKnownService = false
+        pendingServiceCandidates.removeAll(keepingCapacity: true)
+        lastServiceOpenFailure = nil
+
+        for endpoint in SonyServiceEndpoint.connectionPriority {
+            let bytes = endpoint.uuidBytes
+            let uuid = IOBluetoothSDPUUID(
+                bytes: bytes,
+                length: bytes.count
+            )
+            guard let record = device.getServiceRecord(for: uuid) else {
+                continue
             }
-            return false
-        }
-        FileLogger.shared.log("bt", "Sony service found: \(record.getServiceName() ?? "?")")
 
-        var channelID: BluetoothRFCOMMChannelID = 0
-        let getResult = record.getRFCOMMChannelID(&channelID)
-        guard getResult == kIOReturnSuccess else {
-            status = .failed(reason: "Service record has no RFCOMM channel")
-            return false
-        }
-        FileLogger.shared.log("bt", "RFCOMM channel id = \(channelID)")
+            foundKnownService = true
+            FileLogger.shared.log(
+                "bt",
+                "Sony \(endpoint.rawValue.uppercased()) service found: \(record.getServiceName() ?? "?")"
+            )
 
-        var openedChannel: IOBluetoothRFCOMMChannel?
-        let openResult = device.openRFCOMMChannelAsync(&openedChannel,
-                                                       withChannelID: channelID,
-                                                       delegate: self)
-        guard openResult == kIOReturnSuccess else {
-            status = .failed(reason: "openRFCOMMChannelAsync error: \(openResult)")
-            return false
+            var channelID: BluetoothRFCOMMChannelID = 0
+            let channelResult = record.getRFCOMMChannelID(&channelID)
+            guard channelResult == kIOReturnSuccess else {
+                lastServiceOpenFailure =
+                    "Sony \(endpoint.rawValue.uppercased()) service has no RFCOMM channel"
+                continue
+            }
+            FileLogger.shared.log(
+                "bt",
+                "\(endpoint.rawValue.uppercased()) RFCOMM channel id = \(channelID)"
+            )
+
+            pendingServiceCandidates.append(
+                ServiceCandidate(
+                    endpoint: endpoint,
+                    channelID: channelID
+                )
+            )
         }
-        channel = openedChannel
-        return true
+
+        if !pendingServiceCandidates.isEmpty {
+            switch openNextService(on: device) {
+            case .opened:
+                return .opened
+            case .exhausted(let reason):
+                return .failed(reason: reason)
+            }
+        }
+
+        if foundKnownService {
+            return .failed(
+                reason: lastServiceOpenFailure
+                    ?? "Known Sony services could not be opened"
+            )
+        }
+
+        logCachedServices(for: device)
+        return .notFound
+    }
+
+    private func openNextService(
+        on device: IOBluetoothDevice
+    ) -> ServiceCandidateOpenResult {
+        while !pendingServiceCandidates.isEmpty {
+            let candidate = pendingServiceCandidates.removeFirst()
+            var openedChannel: IOBluetoothRFCOMMChannel?
+            activeEndpoint = candidate.endpoint
+            let openResult = device.openRFCOMMChannelAsync(
+                &openedChannel,
+                withChannelID: candidate.channelID,
+                delegate: self
+            )
+            guard openResult == kIOReturnSuccess else {
+                activeEndpoint = nil
+                lastServiceOpenFailure =
+                    "Opening Sony \(candidate.endpoint.rawValue.uppercased()) RFCOMM failed: \(openResult)"
+                continue
+            }
+
+            channel = openedChannel
+            return .opened
+        }
+
+        return .exhausted(
+            reason: lastServiceOpenFailure
+                ?? "Known Sony services could not be opened"
+        )
+    }
+
+    private func logCachedServices(for device: IOBluetoothDevice) {
+        FileLogger.shared.log(
+            "bt",
+            "Neither Sony V1 nor V2 UUID found in cached SDP records"
+        )
+        guard let records =
+            device.services as? [IOBluetoothSDPServiceRecord] else {
+            return
+        }
+
+        for record in records {
+            var channelID: BluetoothRFCOMMChannelID = 0
+            let hasChannel =
+                record.getRFCOMMChannelID(&channelID)
+                == kIOReturnSuccess
+            FileLogger.shared.log(
+                "bt",
+                "  service: \(record.getServiceName() ?? "?") rfcomm=\(hasChannel ? String(channelID) : "no")"
+            )
+        }
     }
 }
 
 extension BluetoothClient {
     @objc func sdpQueryComplete(_ device: IOBluetoothDevice!, status: IOReturn) {
+        guard case .connecting = self.status,
+              self.device?.addressString == device?.addressString else {
+            return
+        }
         guard status == kIOReturnSuccess, let device = device else {
             self.status = .failed(reason: "SDP query failed: \(status)")
             return
         }
-        if !findServiceAndOpen(device: device) {
-            self.status = .failed(reason: "Sony service UUID not advertised by device")
+        switch findServiceAndOpen(device: device) {
+        case .opened:
+            break
+        case .notFound:
+            self.status = .failed(
+                reason: "Neither Sony V1 nor V2 service is advertised"
+            )
+        case .failed(let reason):
+            self.status = .failed(reason: reason)
         }
     }
 }
 
 extension BluetoothClient: IOBluetoothRFCOMMChannelDelegate {
     func rfcommChannelOpenComplete(_ rfcommChannel: IOBluetoothRFCOMMChannel!, status error: IOReturn) {
+        guard case .connecting = status else {
+            rfcommChannel?.close()
+            return
+        }
+        if let channel,
+           let callbackChannel = rfcommChannel,
+           channel !== callbackChannel {
+            callbackChannel.close()
+            return
+        }
         if error != kIOReturnSuccess {
-            status = .failed(reason: "RFCOMM open failed: \(error)")
+            if let activeEndpoint {
+                lastServiceOpenFailure =
+                    "Opening Sony \(activeEndpoint.rawValue.uppercased()) RFCOMM failed asynchronously: \(error)"
+            }
+            channel = nil
+            activeEndpoint = nil
+            guard let device else {
+                status = .failed(
+                    reason: lastServiceOpenFailure
+                        ?? "RFCOMM open failed: \(error)"
+                )
+                return
+            }
+            switch openNextService(on: device) {
+            case .opened:
+                FileLogger.shared.log(
+                    "bt",
+                    "trying the next Sony RFCOMM endpoint"
+                )
+            case .exhausted(let reason):
+                status = .failed(reason: reason)
+            }
+            return
+        }
+        guard let endpoint = activeEndpoint else {
+            status = .failed(reason: "RFCOMM opened without a Sony endpoint")
+            rfcommChannel.close()
             channel = nil
             return
         }
+        channel = rfcommChannel
+        pendingServiceCandidates.removeAll(keepingCapacity: true)
+        lastServiceOpenFailure = nil
         let name = rfcommChannel.getDevice()?.name ?? "Sony headphones"
-        status = .connected(deviceName: name)
+        status = .connected(deviceName: name, endpoint: endpoint)
     }
 
     func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!,
                            data dataPointer: UnsafeMutableRawPointer!,
                            length dataLength: Int) {
+        guard channel === rfcommChannel else { return }
         let data = Data(bytes: dataPointer, count: dataLength)
         FileLogger.shared.hex("rx", data)
         onData?(data)
     }
 
     func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
+        guard channel === rfcommChannel else { return }
         channel = nil
+        activeEndpoint = nil
+        pendingServiceCandidates.removeAll(keepingCapacity: true)
+        lastServiceOpenFailure = nil
         status = .disconnected
     }
 }
