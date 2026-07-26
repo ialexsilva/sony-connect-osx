@@ -10,9 +10,9 @@ final class EqualizerView: NSView {
     private var sliders: [NSSlider] = []
     private var labels: [NSTextField] = []
 
-    private let axisInset: CGFloat = 20   // room for the +10/0/-10 reference column
+    private let axisInset: CGFloat = 30
+    private let axisLabelWidth: CGFloat = 24
     private let hInset: CGFloat = 16
-    private let topPad: CGFloat = 8
     private let sliderHeight: CGFloat = 58
     private let labelHeight: CGFloat = 13
     private let labelGap: CGFloat = 2
@@ -20,7 +20,7 @@ final class EqualizerView: NSView {
     private let sliderWidth: CGFloat = 16
 
     init() {
-        let h = 8 + 58 + 2 + 13 + 6
+        let h = 10 + 58 + 2 + 13 + 6
         super.init(frame: NSRect(x: 0, y: 0, width: 300, height: CGFloat(h)))
         autoresizingMask = [.width]
         addAxisLabels()
@@ -32,9 +32,14 @@ final class EqualizerView: NSView {
         let sliderY = bottomPad + labelHeight + labelGap
         for (value, yFraction) in [("+10", 1.0), ("0", 0.5), ("-10", 0.0)] {
             let l = makeLabel(value)
-            l.alignment = .left
+            l.alignment = .right
             let y = sliderY + CGFloat(yFraction) * sliderHeight - labelHeight / 2
-            l.frame = NSRect(x: 2, y: y, width: axisInset - 4, height: labelHeight)
+            l.frame = NSRect(
+                x: axisInset - axisLabelWidth - 4,
+                y: y,
+                width: axisLabelWidth,
+                height: labelHeight
+            )
             l.autoresizingMask = [.maxXMargin]
             addSubview(l)
         }
