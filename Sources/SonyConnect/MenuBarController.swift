@@ -35,10 +35,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // Without an autosaveName, macOS doesn't remember a dragged position
-        // across the item disappearing and reappearing (isVisible toggling
-        // below) — it just re-inserts wherever. This keys the position to a
-        // stable name so a manual drag sticks across connect/disconnect.
+        // Keep a stable identity so macOS remembers a manually dragged
+        // position across app launches.
         statusItem.autosaveName = "SonyConnectStatusItem"
         super.init()
         configureStatusButton()
@@ -295,11 +293,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusMenuItem.title = state.statusDescription
         autoOffMenuItem.state = state.autoOffEnabled ? .on : .off
 
-        // Only show the menu-bar icon while the headphones are present at
-        // the BT level. While they're present but our SPP channel is closed
-        // for battery saving ("idle"), the icon stays visible and normal.
-        statusItem.isVisible = state.deviceReachable
-        statusItem.button?.appearsDisabled = false
+        // The app has no Dock icon, so its menu-bar item must remain
+        // available even when the headphones are off or out of range.
+        // Dimming communicates reachability without hiding the controls,
+        // reconnect action, log access, or Quit command.
+        statusItem.isVisible = true
+        statusItem.button?.appearsDisabled = !state.deviceReachable
+        statusItem.button?.toolTip = state.statusDescription
 
         if let level = state.batteryLevel {
             let suffix = state.batteryCharging ? " (charging)" : ""

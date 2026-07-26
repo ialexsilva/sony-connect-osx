@@ -53,7 +53,7 @@ Run the framing, protocol-session, and V1 adapter contract tests with `make test
 
 ## Usage
 
-While the headphones are connected to the Mac at the Bluetooth level, a headphones icon appears in the menu bar. Click it (left or right) to open the menu:
+A headphones icon remains available in the menu bar while SonyConnect is running. It appears dimmed when the headphones are off or out of range. Click it (left or right) to open the menu:
 
 - **Touch Sensor: ON / OFF** — click to toggle
 - **Noise Cancelling ▸** — submenu with three radio-style options (NC, Ambient, Off) plus Ambient Sound level and Focus on Voice settings
